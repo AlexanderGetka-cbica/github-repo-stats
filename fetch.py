@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # Copyright 2018 - 2020 Dr. Jan-Philip Gehrcke
+# Newer Portions Copyright 2023 Alexander Getka
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may not
 # use this file except in compliance with the License. You may obtain a copy of
@@ -58,8 +59,14 @@ INVOCATION_TIME_STRING = NOW.strftime("%Y-%m-%d_%H%M%S")
 if not os.environ.get("GHRS_GITHUB_API_TOKEN", None):
     sys.exit("error: environment variable GHRS_GITHUB_API_TOKEN empty or not set")
 
-GHUB = Github(login_or_token=os.environ["GHRS_GITHUB_API_TOKEN"].strip(), per_page=100)
+## These two don't need to be mandatory...
+if not os.environ.get("GHRS_DOCKERHUB_API_TOKEN", None):
+    sys.exit("error: environment variable GHRS_DOCKERHUB_API_TOKEN empty or not set")
+if not os.environ.get("GHRS_BIGQUERY_API_TOKEN", None):
+    sys.exit("error: envronment variable GHRS_BIGQUERY_API_TOKEN empty or not set")
 
+GHUB = Github(login_or_token=os.environ["GHRS_GITHUB_API_TOKEN"].strip(), per_page=100)
+# TODO: get data from Docker Hub and PyPI
 
 def main() -> None:
     args = parse_args()
@@ -140,7 +147,7 @@ def fetch_and_write_fork_ts(repo: Repository.Repository, path: str):
     dfforkcsv.to_csv(tpath, index_label="time_iso8601")
     os.rename(tpath, path)
 
-
+## currently returns a 3-tuple, make more flexible
 def fetch_all_traffic_api_endpoints(
     repo,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -156,6 +163,15 @@ def fetch_all_traffic_api_endpoints(
 
     log.info("fetch data for views")
     df_views = clones_or_views_to_df(fetch_views(repo), "views")
+    
+    log.info("fetch release data")
+    df_releases = releases_to_df(fetch_releases(repo))
+
+    log.info("fetch PyPI data")
+    df_pypi = pypi_to_df(fetch_pypi_info())
+
+    log.info("fetch Docker Hub data")
+    df_dockerhub = dockerhub_to_df(fetch_dockerhub_info())
 
     # Note that df_clones and df_views should have the same datetime index, but
     # there is no guarantee for that. Create two separate data frames, then
@@ -178,13 +194,16 @@ def fetch_all_traffic_api_endpoints(
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Fetch traffic data for GitHub repository. Requires the "
-        "environment variables GITHUB_USERNAME and GITHUB_APITOKEN to be set."
+        "environment variables GITHUB_USERNAME and GITHUB_APITOKEN to be set. "
+        "Also fetches Docker Hub and PyPI traffic data, if available. "
+        "Docker Hub support requires DOCKERHUB_USERNAME and DOCKERHUB_APITOKEN to be set."
+        "PyPI support requires PYPI_APITOKEN to be set. "
     )
 
     parser.add_argument(
         "repo",
         metavar="REPOSITORY",
-        help="Owner/organization and repository. Must contain a slash. "
+        help="Owner/organization and repository (GitHub). Must contain a slash. "
         "Example: coke/truck",
     )
 
@@ -209,10 +228,30 @@ def parse_args():
         help="Fetch stargazer time series and write to this CSV file. Overwrite if file exists.",
     )
 
+    parser.add_argument(
+        "--dockerhub-repo",
+        default="",
+        type=str,
+        metavar="REPOSITORY",
+        help="Owner/organization and repository (Docker Hub). Must contain a slash.",
+    )
+
+    parser.add_argument(
+        "--pypi-repo",
+        default="",
+        type=str,
+        metavar="REPOSITORY",
+        help="Repository name on PyPI.",
+    )
+
     args = parser.parse_args()
 
     if "/" not in args.repo:
         sys.exit("missing slash in REPOSITORY spec")
+
+    if args.dockerhub_repo:
+        if "/" not in args.dockerhub_repo:
+            sys.exit("missing slash in Docker Hub REPOSITORY spec")
 
     ownerid, repoid = args.repo.split("/")
     outdir_path_default = f"_ghrs_{ownerid}_{repoid}"
@@ -321,6 +360,11 @@ def clones_or_views_to_df(items, metric) -> pd.DataFrame:
     log.info("dataframe datetimeindex detail: %s", df.index)
     return df
 
+def pypi_to_df():
+    raise NotImplementedError
+
+def dockerhub_to_df():
+    raise NotImplementedError
 
 def get_forks_over_time(repo: Repository.Repository) -> pd.DataFrame:
     # TODO: for ~10k forks repositories, this operation is too costly for doing
@@ -429,6 +473,12 @@ def get_stars_over_time(repo: Repository.Repository) -> pd.DataFrame:
     log.info("stargazer df\n %s", df)
     return df
 
+def fetch_pypi_info():
+    # See https://packaging.python.org/en/latest/guides/analyzing-pypi-package-downloads/
+    os.environ["GHRS_BIGQUERY_API_TOKEN"].strip()
+
+def fetch_dockerhub_info():
+    os.environ["GHRS_DOCKERHUB_API_TOKEN"].strip()
 
 def handle_rate_limit_error(exc):
 
@@ -482,6 +532,10 @@ def fetch_top_referrers(repo):
 def fetch_top_paths(repo):
     return repo.get_top_paths()
 
+@retrying.retry(wait_fixed=60000, retry_on_exception=handle_rate_limit_error)
+def fetch_releases(repo):
+# TODO: Can we just do the more in-depth checking here? Or do we need a separate call?
+    return repo.get_releases()
 
 if __name__ == "__main__":
     main()
